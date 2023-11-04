@@ -1,0 +1,5 @@
+*.pyc
+test.ipynb
+
+# data is partially downloaded atm (incomplete)
+data/
