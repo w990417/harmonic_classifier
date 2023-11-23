@@ -1,5 +1,7 @@
+__pycache__/
 *.pyc
 test.ipynb
 
-# data is partially downloaded atm (incomplete)
+# data is too large and copyrighed
 data/
+download_info.BACKUP
