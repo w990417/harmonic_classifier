@@ -46,16 +46,6 @@ note_to_idx = {'C': 0,
                 'B': 11}
 
 
-def to_Chord(start_time, end_time, notation, drop_extended=True):
-    """Factory function for Chord class.
-    Returns None if notation is 'N'
-    Otherwise, returns a Chord object
-
-    TODO: MIGHT ADD CHORD CONSTRUCTION WITHOUT START_TIME AND END_TIME
-    """
-    return None if notation == 'N' else Chord(start_time, end_time, notation, drop_extended)
-
-
 class Chord(object):
     """
     Attributes
@@ -152,6 +142,15 @@ class Chord(object):
             return components if drop_extended else components + [None]
 
 
+def to_Chord(start_time, end_time, notation, drop_extended=True):
+    """Factory function for Chord class.
+    Returns None if notation is 'N'
+    Otherwise, returns a Chord object
+
+    TODO: MIGHT ADD CHORD CONSTRUCTION WITHOUT START_TIME AND END_TIME
+    """
+    return None if notation == 'N' else Chord(start_time, end_time, notation, drop_extended)
+
 
 def print_frame(data):
     """Render the frame as a human-readable table
@@ -172,3 +171,20 @@ def print_frame(data):
             print(f"{val:.2f}\t", end='')
         print()
     print('='*100)
+
+
+def read_lab(file_path):
+    """Reads a .lab file and returns a list of tuples (start_time, end_time, label)
+    
+    Parameters
+    ==========
+    file_path: str
+        path to the .lab file
+    """
+    with open(file_path, 'r') as f:
+        lines = f.readlines()
+    
+    lines = [line.strip().split('\t') for line in lines]
+    lines = [(float(line[0]), float(line[1]), line[2]) for line in lines]
+    
+    return lines

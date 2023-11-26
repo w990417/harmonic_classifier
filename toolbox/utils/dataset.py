@@ -3,7 +3,7 @@ import os
 import json
 import pandas as pd
 from torch.utils.data import Dataset
-from . import jaah_util
+from toolbox.utils import downloader
 
 class JAAHDataset(Dataset):
     """JAAH dataset for PyTorch
@@ -132,7 +132,7 @@ class JAAHDataset(Dataset):
 
         for title, mbid in mbids.items():
             filename = title + suffix
-            download_info[title] = jaah_util.download(mbid, filename, self.audio_path)
+            download_info[title] = downloader.download(mbid, filename, self.audio_path)
 
         with open(os.path.join(self.audio_path, 'download_info.json'), 'w') as f:
             json.dump(download_info, f, indent=4)
