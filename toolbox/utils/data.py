@@ -1,5 +1,6 @@
 """This file is for defining classes and functions related to musical data"""
 import numpy as np
+import pandas as pd
 
 chord_to_degree = {'maj': ['3', '5', None],
                     'min': ['b3', '5', None],
@@ -46,57 +47,81 @@ note_to_idx = {'C': 0,
                 'B': 11}
 
 
-class Chord(object):
-    """
-    Attributes
-    ==========
-    notation: str
-        Chord notation as read from the .lab file
-    components: list[str]
-        List of notes (components) of the chord. (e.g. ['C', '3', '5', '7'] to represent a Cmaj7 chord)
-        The first element (root) is in note name format (e.g. 'C', 'C#', 'Db').
-        The rest of the elements are in degree format (e.g. '3', 'b3', '#5').
-    root, third, fifth, seventh: str or None
-        The root, third, fifth, seventh note of the chord.
-        If the chord does not have the corresponding note, the attribute is None.
-    extended: NOT IMPLEMENTED YET (drop_extended is always True at the moment)
-        Set to None at the moment.
-    """
-
-    def __init__(self, start_time, end_time, notation, drop_extended=True):
-        self.notation = notation
-        self.components = self._get_components(notation, drop_extended)
-        self.frame = self._get_frame(self.components)
+class ChordFrame:
+    def __init__(self, lab_path:str, start_time:float, end_time:float, drop_N:bool, drop_extended:bool=True):
+        self.lab_path = lab_path
+        self.track_id = lab_path.split('/')[-1].split('.')[0]
         self.start_time = start_time
         self.end_time = end_time
+        self.drop_N = drop_N
+        self.drop_extended = drop_extended
+        self.time_frame, self.chord_frame = self._get_frame()
 
-    def describe(self, only_frame=False):
-        """Prints the chord's notation, components and frame"""
+    def _get_frame(self):
+        lines = self._read_lab()
+        time_frame = np.zeros((len(lines), 2))
+        chord_frame = np.zeros((len(lines), 4 if self.drop_extended else 5, 13))
+        for i, line in enumerate(lines):
+            time_frame[i, :] = line[:2]
+            chord_frame[i] = self._components_to_frame(self._notation_to_components(line[2]))
+            
+        return time_frame, chord_frame
+    
+    def __len__(self):
+        return len(self.time_frame)
+
+
+    def _read_lab(self):
+        """Reads a .lab file and returns a list of tuples (start_time, end_time, notation)."""
         
-        if not only_frame:
-            print('Notation:', self.notation)
-            print('-'*22)
-            print('Components:', self.components)
-            print('-'*22)
-            print('Duration:', self.start_time, '~', self.end_time)
-            print('-'*22)
-        print_frame(self.frame)
+        with open(self.lab_path, 'r') as f:
+            lines = f.readlines()
+        
+        lines = [line.strip().split('\t') for line in lines]
+        lines = [(float(line[0]), float(line[1]), line[2]) for line in lines]
+
+        lines = [line for line in lines if line[0] >= self.start_time and line[1] <= self.end_time]
+        if self.drop_N:
+            lines = [line for line in lines if line[2] != 'N']
+        
+        return lines
 
 
-    def _get_frame(self, components):
+    def _notation_to_components(self, notation:str):
+        """Returns a list of notes (components) from .lab notation
+        
+        Returns
+        =======
+        [root, third, fitfh, seventh] if drop_extended is True
+        [root, third, fitfh, seventh, extended] if drop_extended is False
+        None if notation is 'N'
+        """
+        if notation == 'N':
+            return None
+        
+        root, rest = notation.split(':')
+        if rest[0] == '(':
+            components = [root] + rest[1:-1].split(',')
+            return components[:-1] if self.drop_extended else components
+
+        components = [root] + chord_to_degree[rest]
+        return components if self.drop_extended else components + [None]
+        
+
+    def _components_to_frame(self, components:list[str]|None, drop_extended:bool=True):
         """Returns a stack of 13-dim vectors representing the chord frame
         as an numpy.ndarray.
         
                 0   1   2   3   4   5   6   7   8   9   10  11  12
                 C   C#  D   D#  E   F   F#  G   G#  A   A#  B   None
         =================================================================
-        root
+        0 root
         -----------------------------------------------------------------
-        third
+        1 third
         -----------------------------------------------------------------
-        fifth
+        2 fifth
         -----------------------------------------------------------------
-        seventh
+        3 seventh
         -----------------------------------------------------------------
         extended (NOT IMPLEMENTED)
         =================================================================
@@ -113,8 +138,21 @@ class Chord(object):
             elements may represent uncertainty in the chord label, whereas
             a row vector with low values for all the elements except the last
             may indicate the absence of the corresponding chord degree.
+
+        Parameters
+        ==========
+        components: list[str]|None
+            List of notes (components) in the chord.
+            root is in note format, rest of the components are in degree format.
+            If None, returns a frame with the last column set to 1.0.
         """
-        frame = np.zeros((4, 13))
+        num_components = 4 if drop_extended else 5
+        frame = np.zeros((num_components, 13))
+
+        if components is None:
+            frame[:, -1] = 1.0
+            return frame
+            
         for i, comp in enumerate(components):
             if i == 0: # root in note format
                 frame[i, note_to_idx[comp]] = 1.0
@@ -122,34 +160,100 @@ class Chord(object):
                 frame[i, degree_to_idx[comp]] = 1.0
         
         return frame
-
-
-    def _get_components(self, lab_notation, drop_extended=True):
-        """Returns a list of notes (components) from lab file's chord notation
+    
+    def as_df(self, index:int, color=True):
+        """Render the chord-frame as a pd.DataFrame.
         
-        Returns
-        =======
-        [root, third, fitfh, seventh] if drop_extended is True
-        [root, third, fitfh, seventh, extended] if drop_extended is False
+        Parameters
+        ==========
+        index: int
+            index of the chord-frame to be rendered
+        color: bool
+            If True, use gradient color to represent the probability values.
         """
+        df = pd.DataFrame(self.chord_frame[index], columns=['C', 'C#', 'D', 'D#', 'E', 'F', 'F#',
+                                                            'G', 'G#', 'A', 'A#', 'B', 'None'])
+        df.index = ['root', '3rd', '5th', '7th']
 
-        root, rest = lab_notation.split(':')
-        if rest[0] == '(':
-            components = [root] + rest[1:-1].split(',')
-            return components[:-1] if drop_extended else components
-        else:
-            components = [root] + chord_to_degree[rest]
-            return components if drop_extended else components + [None]
+        if color:
+            return df.style.background_gradient(cmap="YlGnBu", axis=1, low=0.0, high=1.0)
+
+        return df
 
 
-def to_Chord(start_time, end_time, notation, drop_extended=True):
-    """Factory function for Chord class.
-    Returns None if notation is 'N'
-    Otherwise, returns a Chord object
-
-    TODO: MIGHT ADD CHORD CONSTRUCTION WITHOUT START_TIME AND END_TIME
+def notation_to_components(notation, drop_extended=True):
+    """Returns a list of notes (components) from .lab notation
+    
+    Returns
+    =======
+    [root, third, fitfh, seventh] if drop_extended is True
+    [root, third, fitfh, seventh, extended] if drop_extended is False
+    None if notation is 'N'
     """
-    return None if notation == 'N' else Chord(start_time, end_time, notation, drop_extended)
+    if notation == 'N':
+        return None
+    
+    root, rest = notation.split(':')
+    if rest[0] == '(':
+        components = [root] + rest[1:-1].split(',')
+        return components[:-1] if drop_extended else components
+    else:
+        components = [root] + chord_to_degree[rest]
+        return components if drop_extended else components + [None]
+
+
+def components_to_frame(components:list[str]|None, drop_extended:bool=True):
+    """Returns a stack of 13-dim vectors representing the chord frame
+    as an numpy.ndarray.
+    
+            0   1   2   3   4   5   6   7   8   9   10  11  12
+            C   C#  D   D#  E   F   F#  G   G#  A   A#  B   None
+    =================================================================
+    0 root
+    -----------------------------------------------------------------
+    1 third
+    -----------------------------------------------------------------
+    2 fifth
+    -----------------------------------------------------------------
+    3 seventh
+    -----------------------------------------------------------------
+    extended (NOT IMPLEMENTED)
+    =================================================================
+
+    Float values represent the probability of the note being present and
+    functioning as the corresponding chord degree.
+        For example, if the 'third' vector is [0.1, 0.45, 0.01, ...],
+        there is a .10, .45, .01, ... probability that C, C#, D, ... is 
+        present and functioning as the third of the chord, respectively.
+
+    The last column of each vector is reserved for the probability that
+    the corresponding chord degree is not present.
+        For example, a row vector with similarly low values for all the
+        elements may represent uncertainty in the chord label, whereas
+        a row vector with low values for all the elements except the last
+        may indicate the absence of the corresponding chord degree.
+
+    Parameters
+    ==========
+    components: list[str]|None
+        List of notes (components) in the chord.
+        root is in note format, rest of the components are in degree format.
+        If None, returns a frame with the last column set to 1.0.
+    """
+    num_components = 4 if drop_extended else 5
+    frame = np.zeros((num_components, 13))
+
+    if components is None:
+        frame[:, -1] = 1.0
+        return frame
+        
+    for i, comp in enumerate(components):
+        if i == 0: # root in note format
+            frame[i, note_to_idx[comp]] = 1.0
+        else: # rest of the components in degree format
+            frame[i, degree_to_idx[comp]] = 1.0
+    
+    return frame
 
 
 def print_frame(data):
@@ -173,18 +277,30 @@ def print_frame(data):
     print('='*100)
 
 
-def read_lab(file_path):
-    """Reads a .lab file and returns a list of tuples (start_time, end_time, label)
+def read_lab(lab_path, drop_N:bool, start_time=0.0, end_time=None):
+    """Reads a .lab file and returns a list of tuples (start_time, end_time, notation)
     
     Parameters
     ==========
-    file_path: str
+    lab_path: str
         path to the .lab file
+    drop_N: bool
+        If True, drops the 'N' notation from the output.
+        Otherwise, 'N' notation is kept.
+    start_time: float
+        start time of the firt segment of .lab file to be read
+    end_time: float
+        end time of the last segment of .lab file to be read
     """
-    with open(file_path, 'r') as f:
+    with open(lab_path, 'r') as f:
         lines = f.readlines()
     
     lines = [line.strip().split('\t') for line in lines]
     lines = [(float(line[0]), float(line[1]), line[2]) for line in lines]
+    if end_time is None:
+        end_time = lines[-1][1]
+    lines = [line for line in lines if line[0] >= start_time and line[1] <= end_time]
+    if drop_N:
+        lines = [line for line in lines if line[2] != 'N']
     
     return lines

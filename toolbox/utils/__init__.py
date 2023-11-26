@@ -1,6 +1,7 @@
 from toolbox.utils.data import(
-    Chord,
-    to_Chord,
+    ChordFrame,
+    notation_to_components,
+    components_to_frame,
     print_frame,
     read_lab,
     chord_to_degree,
@@ -26,8 +27,9 @@ from toolbox.utils.downloader import(
     levenshtein_distance,
 )
 
-__all__ = ['Chord',
-           'to_Chord',
+__all__ = ['ChordFrame',
+           'notation_to_components',
+           'components_to_frame',
            'print_frame',
            'read_lab',
            'chord_to_degree',
