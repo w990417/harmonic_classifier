@@ -1,6 +1,14 @@
-"""This file is for defining classes and functions related to musical data"""
+"""Create custom dataset to be used with PyTorch."""
+import os
+import json
 import numpy as np
+import torch
+import torchaudio
 import pandas as pd
+from torch.utils.data import Dataset
+
+from toolbox.utils import downloader
+
 
 chord_to_degree = {'maj': ['3', '5', None],
                     'min': ['b3', '5', None],
@@ -46,69 +54,117 @@ note_to_idx = {'C': 0,
                 'A#': 10, 'Bb': 10,
                 'B': 11}
 
+class JAAHDataset(Dataset):
+    """JAAH dataset for PyTorch.
 
-class ChordFrame:
-    def __init__(self, lab_path:str, start_time:float, end_time:float, drop_N:bool, drop_extended:bool=True):
-        self.lab_path = lab_path
-        self.track_id = lab_path.split('/')[-1].split('.')[0]
-        self.start_time = start_time
-        self.end_time = end_time
-        self.drop_N = drop_N
-        self.drop_extended = drop_extended
-        self.time_frame, self.chord_frame = self._get_frame()
-
-    def _get_frame(self):
-        lines = self._read_lab()
-        time_frame = np.zeros((len(lines), 2))
-        chord_frame = np.zeros((len(lines), 4 if self.drop_extended else 5, 13))
-        for i, line in enumerate(lines):
-            time_frame[i, :] = line[:2]
-            chord_frame[i] = self._components_to_frame(self._notation_to_components(line[2]))
+        Parameters
+        ==========
+        data_home: str
+            path to the JAAH dataset root directory
+        drop_N: bool
+            If True, drop 'N' notations from the lab file.
             
-        return time_frame, chord_frame
-    
-    def __len__(self):
-        return len(self.time_frame)
-
-
-    def _read_lab(self):
-        """Reads a .lab file and returns a list of tuples (start_time, end_time, notation)."""
-        
-        with open(self.lab_path, 'r') as f:
-            lines = f.readlines()
-        
-        lines = [line.strip().split('\t') for line in lines]
-        lines = [(float(line[0]), float(line[1]), line[2]) for line in lines]
-
-        lines = [line for line in lines if line[0] >= self.start_time and line[1] <= self.end_time]
-        if self.drop_N:
-            lines = [line for line in lines if line[2] != 'N']
-        
-        return lines
-
-
-    def _notation_to_components(self, notation:str):
-        """Returns a list of notes (components) from .lab notation
+        Attributes
+        ==========
+        data_home: str
+            path to the JAAH dataset
+        audio_path: str
+            path to the audio/ directory of the JAAH dataset
+        anno_path: str
+            path to the annotations/ directory of the JAAH dataset
+        track_list: list[str]
+            list of track_id for audio files available in audio_path
+        drop_N: bool
+            If True, drop 'N' notations from the lab file.
+        sr: int (default=None)
+            Sample rate to be used if the audio file is to be resampled.
+            If None, use the sample rate of the audio file.
+        to_mono: bool (default=True)
+            If True, convert the audio file to mono.
+            IT IS ALWAYS TRUE FOR NOW.
+        audio_format: str (default='.mp4')
+            audio file format to be used.
         
         Returns
         =======
-        [root, third, fitfh, seventh] if drop_extended is True
-        [root, third, fitfh, seventh, extended] if drop_extended is False
-        None if notation is 'N'
+        __getitem__() returns a list of Segment objects for the given track_id.
+            
         """
-        if notation == 'N':
-            return None
-        
-        root, rest = notation.split(':')
-        if rest[0] == '(':
-            components = [root] + rest[1:-1].split(',')
-            return components[:-1] if self.drop_extended else components
+    def __init__(self, data_home, drop_N:bool,
+                 sr:int=None, to_mono:bool=True, audio_format:str='.mp4'):
 
-        components = [root] + chord_to_degree[rest]
-        return components if self.drop_extended else components + [None]
+        self.data_home = data_home # ./data/JAAH/
+        self.audio_path = os.path.join(data_home, 'audio')
+        self.anno_path = os.path.join(data_home, 'annotations')
+        self.labs_path = os.path.join(data_home, 'labs')
+
+        self.drop_N = drop_N
+        self.sr = sr
+        self.to_mono = to_mono
+        self.audio_format = audio_format
+        
+        self.track_list = self._get_track_list()
+
+    def __len__(self):
+        return len(self.track_list)
+
+
+    def __getitem__(self, track_id):
+        return self._segment_track(track_id)
+
+    
+    def _load_waveform(self, track_id:str):
+        
+        # load audio file
+        audio_path = os.path.join(self.audio_path, track_id + self.audio_format)
+        waveform, sample_rate = torchaudio.load(audio_path)
+
+        # resample if necessary
+        if self.sr is not None:
+            waveform = torchaudio.transforms.Resample(sample_rate, self.sr)(waveform)
+        else:
+            self.sr = sample_rate
+
+        # convert to mono if necessary
+        if self.to_mono:
+            waveform = torch.mean(waveform, dim=0, keepdim=True)
+        
+        return waveform
         
 
-    def _components_to_frame(self, components:list[str]|None, drop_extended:bool=True):
+    def _segment_track(self, track_id:str):
+        """Returns a list of Segment objects for the given track_id.
+        Each audio segment will correspond to a line in the lab file.
+
+        Parameters
+        ==========
+        track_id: str
+            track_id of the audio file to segment
+
+        drop_N: bool
+            If True, drop 'N' notations from the lab file.
+            If False,
+        """
+        segments = []
+        # read lab file
+        lines = self._read_lab(track_id)
+
+        # load audio file
+        waveform = self._load_waveform(track_id)
+
+        # segment audio file
+        for i, line in enumerate(lines):
+            start_time, end_time, notation = line
+            start_frame = int(start_time * self.sr)
+            end_frame = int(end_time * self.sr)
+            seg_audio = waveform[:, start_frame:end_frame]
+            chord_frame = self._components_to_frame(self._notation_to_components(notation))
+            segments.append(Segment(track_id, i, start_time, end_time, seg_audio, chord_frame))
+        
+        return segments
+
+
+    def _components_to_frame(self, components:list[str]|None):
         """Returns a stack of 13-dim vectors representing the chord frame
         as an numpy.ndarray.
         
@@ -122,8 +178,6 @@ class ChordFrame:
         2 fifth
         -----------------------------------------------------------------
         3 seventh
-        -----------------------------------------------------------------
-        extended (NOT IMPLEMENTED)
         =================================================================
 
         Float values represent the probability of the note being present and
@@ -146,10 +200,9 @@ class ChordFrame:
             root is in note format, rest of the components are in degree format.
             If None, returns a frame with the last column set to 1.0.
         """
-        num_components = 4 if drop_extended else 5
-        frame = np.zeros((num_components, 13))
+        frame = np.zeros((4, 13))
 
-        if components is None:
+        if components is None:  # 'N' notation
             frame[:, -1] = 1.0
             return frame
             
@@ -160,147 +213,120 @@ class ChordFrame:
                 frame[i, degree_to_idx[comp]] = 1.0
         
         return frame
+
+
+    def _notation_to_components(self, notation:str):
+        """Returns a list of notes (components) from .lab notation
+        
+        Returns
+        =======
+        [root, third, fitfh, seventh] if drop_extended is True
+        [root, third, fitfh, seventh, extended] if drop_extended is False
+        None if notation is 'N'
+        """
+        if notation == 'N':
+            return None
+        
+        root, rest = notation.split(':')
+        if rest[0] == '(':
+            components = [root] + rest[1:-1].split(',')
+            return components[:-1]
+        
+        components = [root] + chord_to_degree[rest]
+        return components
+
+        
+
+    def _read_lab(self, track_id:str):
+        """Reads a .lab file and returns a list of tuples (start_time, end_time, notation)
+        for each chord in the lab file."""
+        
+        lab_path = os.path.join(self.labs_path, track_id + '.lab')
+        with open(lab_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+        
+        lines = [line.strip().split('\t') for line in lines]
+        lines = [(float(line[0]), float(line[1]), line[2]) for line in lines]
+        
+        return lines
+
+
+    def _get_track_list(self):
+        """Returns a list of track_id for audio files available in audio_path"""
+        track_list = [f.split('.')[0] for f in os.listdir(self.audio_path) if f.endswith(self.audio_format)]
+        
+        assert 'download_info' not in track_list, "download_info.json file was included in the track_list."
+
+        return track_list
     
-    def as_df(self, index:int, color=True):
-        """Render the chord-frame as a pd.DataFrame.
+    def _get_mbids(self, which:list[str]='all'):
+        """Returns {title: mbid} from .json annotation files included in the JAAH dataset
         
         Parameters
         ==========
-        index: int
-            index of the chord-frame to be rendered
-        color: bool
-            If True, use gradient color to represent the probability values.
+        which: list[str], default='all'
+            list of titles of the songs to retrieve mbid for. Must be given as
+            the name of the json file (i.e. snake_case), rather than one given by "title" of the json file.
+            If 'all', return mbids for all songs in the JAAH dataset.
         """
-        df = pd.DataFrame(self.chord_frame[index], columns=['C', 'C#', 'D', 'D#', 'E', 'F', 'F#',
-                                                            'G', 'G#', 'A', 'A#', 'B', 'None'])
-        df.index = ['root', '3rd', '5th', '7th']
-
-        if color:
-            return df.style.background_gradient(cmap="YlGnBu", axis=1, low=0.0, high=1.0)
-
-        return df
-
-
-def notation_to_components(notation, drop_extended=True):
-    """Returns a list of notes (components) from .lab notation
-    
-    Returns
-    =======
-    [root, third, fitfh, seventh] if drop_extended is True
-    [root, third, fitfh, seventh, extended] if drop_extended is False
-    None if notation is 'N'
-    """
-    if notation == 'N':
-        return None
-    
-    root, rest = notation.split(':')
-    if rest[0] == '(':
-        components = [root] + rest[1:-1].split(',')
-        return components[:-1] if drop_extended else components
-    else:
-        components = [root] + chord_to_degree[rest]
-        return components if drop_extended else components + [None]
-
-
-def components_to_frame(components:list[str]|None, drop_extended:bool=True):
-    """Returns a stack of 13-dim vectors representing the chord frame
-    as an numpy.ndarray.
-    
-            0   1   2   3   4   5   6   7   8   9   10  11  12
-            C   C#  D   D#  E   F   F#  G   G#  A   A#  B   None
-    =================================================================
-    0 root
-    -----------------------------------------------------------------
-    1 third
-    -----------------------------------------------------------------
-    2 fifth
-    -----------------------------------------------------------------
-    3 seventh
-    -----------------------------------------------------------------
-    extended (NOT IMPLEMENTED)
-    =================================================================
-
-    Float values represent the probability of the note being present and
-    functioning as the corresponding chord degree.
-        For example, if the 'third' vector is [0.1, 0.45, 0.01, ...],
-        there is a .10, .45, .01, ... probability that C, C#, D, ... is 
-        present and functioning as the third of the chord, respectively.
-
-    The last column of each vector is reserved for the probability that
-    the corresponding chord degree is not present.
-        For example, a row vector with similarly low values for all the
-        elements may represent uncertainty in the chord label, whereas
-        a row vector with low values for all the elements except the last
-        may indicate the absence of the corresponding chord degree.
-
-    Parameters
-    ==========
-    components: list[str]|None
-        List of notes (components) in the chord.
-        root is in note format, rest of the components are in degree format.
-        If None, returns a frame with the last column set to 1.0.
-    """
-    num_components = 4 if drop_extended else 5
-    frame = np.zeros((num_components, 13))
-
-    if components is None:
-        frame[:, -1] = 1.0
-        return frame
+        mbids = {}
         
-    for i, comp in enumerate(components):
-        if i == 0: # root in note format
-            frame[i, note_to_idx[comp]] = 1.0
-        else: # rest of the components in degree format
-            frame[i, degree_to_idx[comp]] = 1.0
-    
-    return frame
+        if which == 'all':
+            which = os.listdir(self.anno_path)
+        else:
+            which = [t + '.json' for t in which]
+
+        for title in which:
+            with open(os.path.join(self.anno_path, title), encoding='utf-8') as f:
+                data = json.load(f)
+                mbids[title.split('.')[0]] = data['mbid']
+
+        return mbids
+
+    def download(self, which:list[str]='all', suffix:str='.mp4', save_download_info:str=None):
+        """Download audio files into audio/ directory from YouTube.
+        Download information is saved in the 'audio/download_info.json' file.
+        
+        Parameters
+        ==========
+        which: list[str], default='all'
+            List of titles of the songs to retrieve mbid for given as 
+            the name of the json file (i.e. snake_case).
+            If 'all', download all songs in the JAAH dataset.
+        suffix: str (default='.mp4')
+            suffix to be added to the audio file name
+        """
+        mbids = self._get_mbids(which)
+
+        download_info = {} # download_info.json file
+
+        for title, mbid in mbids.items():
+            filename = title + suffix
+            download_info[title] = downloader.download(mbid, filename, self.audio_path)
+
+        if save_download_info is not None:
+            with open(os.path.join(self.audio_path, 'download_info.json'), 'w', encoding='utf-8') as f:
+                json.dump(download_info, f, indent=4)
 
 
-def print_frame(data):
-    """Render the frame as a human-readable table
-    
-    Parameters
-    ==========
-    frame: numpy.ndarray or Chord
-    """
-    frame = data if isinstance(data, np.ndarray) else data.frame
+class Segment:
+    """Segment of a track with relavant information."""
 
-    label = ['root', '3rd', '5th', '7th']
-    print()
-    print('\t C\t C#\t D\t D#\t E\t F\t F#\t G\t G#\t A\t A#\t B\tNone')
-    print('='*100)
-    for row in frame:
-        print(f"{label.pop(0)}\t", end='')
-        for val in row:
-            print(f"{val:.2f}\t", end='')
-        print()
-    print('='*100)
+    def __init__(self, track_id:str, seg_id:int, start_time:float, end_time:float,
+                 seg_audio:torch.tensor, chord_frame):
+        self.track_id = track_id
+        self.seg_id = seg_id
+        self.start_time = start_time
+        self.end_time = end_time
+        self.duration = end_time - start_time
+        self.audio = seg_audio
+        self.chord_frame = chord_frame
 
 
-def read_lab(lab_path, drop_N:bool, start_time=0.0, end_time=None):
-    """Reads a .lab file and returns a list of tuples (start_time, end_time, notation)
-    
-    Parameters
-    ==========
-    lab_path: str
-        path to the .lab file
-    drop_N: bool
-        If True, drops the 'N' notation from the output.
-        Otherwise, 'N' notation is kept.
-    start_time: float
-        start time of the firt segment of .lab file to be read
-    end_time: float
-        end time of the last segment of .lab file to be read
-    """
-    with open(lab_path, 'r') as f:
-        lines = f.readlines()
-    
-    lines = [line.strip().split('\t') for line in lines]
-    lines = [(float(line[0]), float(line[1]), line[2]) for line in lines]
-    if end_time is None:
-        end_time = lines[-1][1]
-    lines = [line for line in lines if line[0] >= start_time and line[1] <= end_time]
-    if drop_N:
-        lines = [line for line in lines if line[2] != 'N']
-    
-    return lines
+    def _as_df(self):
+        """Returns segment.chord_frame as a pandas.DataFrame."""
+
+        df = pd.DataFrame(self.chord_frame, columns=['C', 'C#', 'D', 'D#', 'E', 'F', 'F#',
+                                        'G', 'G#', 'A', 'A#', 'B', 'None'])
+        df.index = ['root', '3rd', '5th', '7th']
+        return df.style.background_gradient(cmap="YlGnBu", axis=1, low=0.0, high=1.0)
