@@ -4,6 +4,7 @@ import json
 import numpy as np
 import torch
 import torchaudio
+import librosa
 import pandas as pd
 from torch.utils.data import Dataset
 
@@ -90,8 +91,8 @@ class JAAHDataset(Dataset):
         __getitem__() returns a list of Segment objects for the given track_id.
             
         """
-    def __init__(self, data_home, drop_N:bool,
-                 sr:int=None, to_mono:bool=True, audio_format:str='.mp4'):
+    def __init__(self, data_home, drop_N:bool, use_librosa:bool=True,
+                 sr:int=None, audio_format:str='.mp4'):
 
         self.data_home = data_home # ./data/JAAH/
         self.audio_path = os.path.join(data_home, 'audio')
@@ -99,8 +100,8 @@ class JAAHDataset(Dataset):
         self.labs_path = os.path.join(data_home, 'labs')
 
         self.drop_N = drop_N
+        self.use_librosa = use_librosa
         self.sr = sr
-        self.to_mono = to_mono
         self.audio_format = audio_format
         
         self.track_list = self._get_track_list()
@@ -113,7 +114,7 @@ class JAAHDataset(Dataset):
         return self._segment_track(track_id)
 
     
-    def _load_waveform(self, track_id:str):
+    def _load_audio_torch(self, track_id:str):
         
         # load audio file
         audio_path = os.path.join(self.audio_path, track_id + self.audio_format)
@@ -125,10 +126,14 @@ class JAAHDataset(Dataset):
         else:
             self.sr = sample_rate
 
-        # convert to mono if necessary
-        if self.to_mono:
-            waveform = torch.mean(waveform, dim=0, keepdim=True)
+        waveform = torch.mean(waveform, dim=0, keepdim=True)
         
+        return waveform
+    
+    def _load_audio_librosa(self, track_id:str):
+        audio_path = os.path.join(self.audio_path, track_id + self.audio_format)
+        waveform, sample_rate = librosa.load(audio_path, sr=self.sr)
+        self.sr = sample_rate
         return waveform
         
 
@@ -150,14 +155,17 @@ class JAAHDataset(Dataset):
         lines = self._read_lab(track_id)
 
         # load audio file
-        waveform = self._load_waveform(track_id)
+        if self.use_librosa:
+            waveform = self._load_audio_librosa(track_id) # np.ndarray
+        else:
+            waveform = self._load_audio_torch(track_id) # torch.tensor
 
         # segment audio file
         for i, line in enumerate(lines):
             start_time, end_time, notation = line
             start_frame = int(start_time * self.sr)
             end_frame = int(end_time * self.sr)
-            seg_audio = waveform[:, start_frame:end_frame]
+            seg_audio = waveform[start_frame:end_frame] # didn't account for torch.tensor yet
             chord_frame = self._components_to_frame(self._notation_to_components(notation))
             segments.append(Segment(track_id, i, start_time, end_time, seg_audio, chord_frame))
         
@@ -310,10 +318,14 @@ class JAAHDataset(Dataset):
 
 
 class Segment:
-    """Segment of a track with relavant information."""
+    """Segment of a track with relavant information.
+    
+    If the JAAHDataset was initialised with use_librosa=True, the audio attribute
+    will be a numpy.ndarray. Otherwise, it will be a torch.tensor.
+    """
 
     def __init__(self, track_id:str, seg_id:int, start_time:float, end_time:float,
-                 seg_audio:torch.tensor, chord_frame):
+                 seg_audio, chord_frame):
         self.track_id = track_id
         self.seg_id = seg_id
         self.start_time = start_time
