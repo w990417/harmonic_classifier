@@ -5,3 +5,6 @@ test.ipynb
 # data is too large and copyrighed
 data/
 download_info.BACKUP
+
+# mac os env related
+Miniconda3-latest-MacOSX-arm64.sh
