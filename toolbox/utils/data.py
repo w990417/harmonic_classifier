@@ -5,7 +5,6 @@ import json
 import numpy as np
 import torch
 import librosa
-import pandas as pd
 from torch.utils.data import Dataset
 
 from toolbox.utils import downloader
@@ -45,20 +44,7 @@ degree_to_interval = {'1': 0,
                  '7': 11,
                  None: 12}
 
-# used for the root note
-# note_to_idx = {'C': 0,
-#                 'C#': 1, 'Db': 1,
-#                 'D': 2,
-#                 'D#': 3, 'Eb': 3,
-#                 'E': 4,
-#                 'F': 5,
-#                 'F#': 6, 'Gb': 6,
-#                 'G': 7,
-#                 'G#': 8, 'Ab': 8,
-#                 'A': 9,
-#                 'A#': 10, 'Bb': 10,
-#                 'B': 11, 'Cb': 11,
-#                 'N': 12}
+
 note_to_idx = {'Cb': 11, 'C': 0, 'C#': 1,
                 'Db': 1, 'D': 2, 'D#': 3,
                 'Eb': 3, 'E': 4,
@@ -68,33 +54,6 @@ note_to_idx = {'Cb': 11, 'C': 0, 'C#': 1,
                 'Bb': 10, 'B': 11,
                 'N': 12}
 
-# class Segment:
-#     """Segment of a track with relavant information.
-    
-#     If the JAAHDataset was initialised with use_librosa=True, the audio attribute
-#     will be a numpy.ndarray. Otherwise, it will be a torch.tensor.
-#     """
-
-#     def __init__(self, track_id:str, seg_id:int, start_time:float, end_time:float,
-#                  audio, spectrogram, chord_frame):
-#         self.track_id = track_id
-#         self.seg_id = seg_id
-#         self.start_time = start_time
-#         self.end_time = end_time
-#         self.duration = end_time - start_time
-#         self.audio = audio
-#         self.chord_frame = chord_frame
-#         self.spectrogram = spectrogram
-
-
-#     def _as_df(self):
-#         """Returns segment.chord_frame as a pandas.DataFrame."""
-
-#         df = pd.DataFrame(self.chord_frame, columns=['C', 'C#', 'D', 'D#', 'E', 'F', 'F#',
-#                                         'G', 'G#', 'A', 'A#', 'B', 'None'])
-#         df.index = ['root', '3rd', '5th', '7th']
-#         return df.style.background_gradient(cmap="YlGnBu", axis=1, low=0.0, high=1.0)
-    
 
 class JAAHDataset(Dataset):
     """JAAH dataset for PyTorch.
@@ -138,15 +97,28 @@ class JAAHDataset(Dataset):
         self.audio_dir = os.path.join(data_home, 'audio')
         self.anno_dir = os.path.join(data_home, 'annotations')
         self.labs_dir = os.path.join(data_home, 'labs')
-        self.segs_dir = os.path.join(data_home, 'segs')
+        self.spec_dir = os.path.join(data_home, 'spectrograms')
+        self.cf_dir = os.path.join(data_home, 'chord_frames')
         self.sr = sr
         self.drop_N = drop_N
         
         self.track_list = self._get_track_list()
 
-    def __len__(self):
-        return len(self.track_list)
-
+    def __len__(self, track_id:str|int='all'):
+        """Returns the number of segments in the given track_id.
+        
+        Parameters
+        ==========
+        track_id: str|int
+            Count the number of segments for the given track_id.
+            If 'all', return the number of segments for all track_ids.
+        """
+        if track_id == 'all':
+            lenz = [self.__len__(track_id) for track_id in self.track_list]
+            return lenz
+        elif isinstance(track_id, int):
+            track_id = self.track_list[track_id]
+        return len(self._read_lab(track_id))
 
     def __getitem__(self, track_id:str|int) -> (torch.tensor, torch.tensor):
         """Loads spectrogram and chord-frame tensors from .pt files and return them.
@@ -167,8 +139,8 @@ class JAAHDataset(Dataset):
         if isinstance(track_id, int):
             track_id = self.track_list[track_id]
 
-        spec_path = os.path.join(self.segs_dir, f'{track_id}_spec.pt')
-        chord_path = os.path.join(self.segs_dir, f'{track_id}_chord.pt')
+        spec_path = os.path.join(self.spec_dir, f'{track_id}_spec.pt')
+        chord_path = os.path.join(self.cf_dir, f'{track_id}_cf.pt')
 
         spec = torch.load(spec_path)
         chord_frame = torch.load(chord_path)
@@ -215,14 +187,18 @@ class JAAHDataset(Dataset):
             end_frame = int(end_time * self.sr)
             seg_audio = waveform[start_frame:end_frame]
 
-            list_spectrograms[i] = self._preprocess_audio(seg_audio, spec_h, spec_w)
-
+            # get chord_frame for the segment
             seg_chord_frame = self.get_chord_frame(notation)
+            if seg_chord_frame is None:
+                continue # skip the invalid notation
             list_chord_frames[i] = torch.from_numpy(seg_chord_frame)
 
+            # segment spectrogram
+            list_spectrograms[i] = self._preprocess_audio(seg_audio, spec_h, spec_w)
+
         if savez:
-            torch.save(list_spectrograms, os.path.join(self.segs_dir, f'{track_id}_spec.pt'))
-            torch.save(list_chord_frames, os.path.join(self.segs_dir, f'{track_id}_chord.pt'))
+            torch.save(list_spectrograms, os.path.join(self.spec_dir, f'{track_id}_spec.pt'))
+            torch.save(list_chord_frames, os.path.join(self.cf_dir, f'{track_id}_cf.pt'))
         
         return list_spectrograms, list_chord_frames
         
@@ -295,14 +271,32 @@ class JAAHDataset(Dataset):
 
 
     def get_chord_frame(self, notation) -> np.ndarray:
-        """
-        Cases:
-        1. single note
-        2. single note with bass (e.g. 'C/E')
-        3. inversion/slash (e.g. 'G/b5')
-        4. components (e.g. 'Eb:(b3,5,b7,11)')
-        5. chord type (e.g. 'C:maj7')
-        
+        """Returns a chord_frame for the given notation.
+        Returns None if the notation cannot be parsed into a chord_frame.
+
+        Chord-Frame
+        ===========
+        chord_frame is a 4x13 matrix where each row vector represents the
+        chord's ['root', 'third', 'fifth', 'seventh'] component/degree.
+
+        The first 12 columns represent the 12 notes in the chromatic scale,
+        and the last column represents 'absence' of any note functioning as
+        the corresponding row's chord degree.
+
+        For example,
+        the chord_frame for Cmaj7 with the 'fifth' omitted (C, E, N, B) is:
+
+                C    C#   D    D#   E    F    F#   G    G#   A    A#   B    N
+        ======================================================================
+        root   1.0
+        ----------------------------------------------------------------------
+        third                      1.0
+        ----------------------------------------------------------------------
+        fifth                                                              1.0
+        ----------------------------------------------------------------------
+        seventh                                                       1.0
+        ======================================================================
+        where the rest of the entries are 0.0.
         """
         frame = np.zeros((4,13))
         
@@ -313,11 +307,10 @@ class JAAHDataset(Dataset):
 
         root = re.split(r'[:/]', notation)[0]
         rest = re.split(r'[:/]', notation)[1]
-              
-        if '/' in rest: # discard after slash
-            rest = rest.split('/')[0]
 
-        if rest[0] == '(':
+            
+
+        if rest[0] == '(': # C:(3,5,b7,#9)
             frame[0, note_to_idx[root]] = 1.0
             rest = rest[1:-1]
             for this in rest.split(',')[:3]:
@@ -325,7 +318,9 @@ class JAAHDataset(Dataset):
                     frame[idx] = 1.0
             return frame
         
-        if rest in chord_to_degree: # chord type
+        # Bb:min7 -> (root=Bb, rest=min7)
+        # Bb:7 -> (root=Bb, rest=7) (i.e. 7 is treated as a chord name rather than a degree)
+        if rest in chord_to_degree:
             frame[0, note_to_idx[root]] = 1.0
             rest = chord_to_degree[rest]
             for this in rest:
@@ -333,13 +328,38 @@ class JAAHDataset(Dataset):
                     frame[idx] = 1.0
             return frame
 
-        if rest in degree_to_interval:
+        # C/G -> (root=C, rest=G)
+        if rest in note_to_idx:
             frame[0, note_to_idx[root]] = 1.0
-            idx = self.get_idx(rest, root)
-            frame[idx] = 1.0
+            frame[self.get_idx(rest, root)] = 1.0
             return frame
 
-        raise ValueError(f'get_chord_frame({notation}) error: notation={notation}')
+        # C/b5 -> (root=C, rest=b5)
+        if rest in degree_to_interval:
+            frame[0, note_to_idx[root]] = 1.0
+            frame[self.get_idx(rest, root)] = 1.0
+            return frame
+
+        # B:min/7 -> (root=B, rest=min/7) -> (root=B, chord=min, inversion=7)
+        if '/' in rest:
+            try:
+                chord, inversion = rest.split('/')
+                frame[0, note_to_idx[root]] = 1.0
+                chord = chord_to_degree[chord]
+                for this in chord:
+                    if idx:= self.get_idx(this, root):
+                        frame[idx] = 1.0
+                
+                # inversion=7 not in chord=[3, 5] -> add 7 to chord_frame
+                if inversion in note_to_idx and inversion not in rest:
+                    frame[self.get_idx(inversion, root)] = 1.0
+
+                return frame
+
+            except ValueError:
+                raise ValueError(f'get_chord_frame({notation}) error: rest={rest}')
+        
+        return None
 
 
 
@@ -365,29 +385,35 @@ class JAAHDataset(Dataset):
 
         return track_list
     
-    def _get_mbids(self, which:list[str]='all'):
+    def _read_anno(self, key:str, track_id:str|int='all'):
         """Returns {title: mbid} from .json annotation files included in the JAAH dataset
         
         Parameters
         ==========
-        which: list[str], default='all'
-            list of titles of the songs to retrieve mbid for. Must be given as
-            the name of the json file (i.e. snake_case), rather than one given by "title" of the json file.
-            If 'all', return mbids for all songs in the JAAH dataset.
+        track_id: str|int, default='all'
+            Track_id to read annotation file for.
+            If 'all', read all .json files in the annotations/ directory.
+        key: str from ['mbid', 'key', 'duration']
+            Which relevant information to retrieve from the .json file.
         """
-        mbids = {}
-        
-        if which == 'all':
-            which = os.listdir(self.anno_dir)
+        if track_id == 'all':
+            list_filename = [track_id + '.json' for track_id in self.track_list]
+            data = [None] * len(self.track_list)
+
+            for i, filename in enumerate(list_filename):
+                with open(os.path.join(self.anno_dir, filename), encoding='utf-8') as f:
+                    data[i] = json.load(f)[key]
+            return data
+                
+        if isinstance(track_id, int):
+            filename = self.track_list[track_id] + '.json'
         else:
-            which = [t + '.json' for t in which]
+            filename = track_id + '.json'
 
-        for title in which:
-            with open(os.path.join(self.anno_dir, title), encoding='utf-8') as f:
-                data = json.load(f)
-                mbids[title.split('.')[0]] = data['mbid']
+        with open(os.path.join(self.anno_dir, filename), encoding='utf-8') as f:
+            data = json.load(f)[key]
+            return data
 
-        return mbids
 
     def download(self, which:list[str]='all', suffix:str='.mp4', save_download_info:str=None):
         """Download audio files into audio/ directory from YouTube.
@@ -402,7 +428,7 @@ class JAAHDataset(Dataset):
         suffix: str (default='.mp4')
             suffix to be added to the audio file name
         """
-        mbids = self._get_mbids(which)
+        mbids = self._read_anno(which, 'mbid')
 
         download_info = {} # download_info.json file
 

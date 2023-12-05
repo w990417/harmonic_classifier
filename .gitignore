@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 test.ipynb
+memo
 
 # data is too large and copyrighed
 data/
