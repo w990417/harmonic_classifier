@@ -132,7 +132,7 @@ class JAAHDataset(Dataset):
         __getitem__() returns a list of Segment objects for the given track_id.
             
         """
-    def __init__(self, data_home, drop_N:bool, sr:int=44100, audio_format:str='.mp4'):
+    def __init__(self, data_home, drop_N:bool, sr:int=44100):
 
         self.data_home = data_home # ./data/JAAH/
         self.audio_dir = os.path.join(data_home, 'audio')
@@ -141,7 +141,6 @@ class JAAHDataset(Dataset):
         self.segs_dir = os.path.join(data_home, 'segs')
         self.sr = sr
         self.drop_N = drop_N
-        self.audio_format = audio_format
         
         self.track_list = self._get_track_list()
 
@@ -149,106 +148,128 @@ class JAAHDataset(Dataset):
         return len(self.track_list)
 
 
-    def __getitem__(self, track_id:str|int, seg_id:list[int]=None):
-        """Loads segments from .npz files and return them.
+    def __getitem__(self, track_id:str|int) -> (torch.tensor, torch.tensor):
+        """Loads spectrogram and chord-frame tensors from .pt files and return them.
         
         Parameters
         ==========
         track_id: str|int
             Track_id of the audio, spectrogram, and chord_frame to be loaded.
             If int, track_id will be self.track_list[track_id].
-        seg_id: list[int] (default=None)
-            List of segment ids to be loaded. If None, all segments for the given
-            track_id will be loaded.
 
         Returns
         =======
-        -> list[(spectrogram, chord_frame)]
+        spec: torch.tensor, shape=(n_segments, spec_h, spec_w)
+            Spectrogram tensor for the given track_id.
+        chord_frame: torch.tensor, shape=(n_segments, 4, 13)
+            Chord-frame tensor for the given track_id.
         """
         if isinstance(track_id, int):
             track_id = self.track_list[track_id]
 
-        seg_path = os.path.join(self.segs_dir, track_id)
+        spec_path = os.path.join(self.segs_dir, f'{track_id}_spec.pt')
+        chord_path = os.path.join(self.segs_dir, f'{track_id}_chord.pt')
 
-        if seg_id is None:
-            seg_list = [os.path.join(seg_path, f) for f in os.listdir(seg_path) if f.endswith('.npz')]
-        else:
-            seg_list = [os.path.join(seg_path, f'{track_id}_{i}.npz') for i in seg_id]
-        
-        segments = []
-        for seg in seg_list:
-            with np.load(seg) as data:
-                    segments.append((data['spec'], data['chord']))
-        
-        return segments
+        spec = torch.load(spec_path)
+        chord_frame = torch.load(chord_path)
 
+        return spec, chord_frame
 
     def _load_audio(self, track_id:str):
-        audio_path = os.path.join(self.audio_dir, track_id + self.audio_format)
+        audio_path = os.path.join(self.audio_dir, track_id + '.mp4')
         waveform, sample_rate = librosa.load(audio_path, sr=self.sr)
         self.sr = sample_rate
         return waveform
 
 
-    def segment_track(self, track_id:str, savez:bool=True, spec_h:int=84, spec_w:int=168):
-        """
+    def segment_track(self, track_id:str|int, savez:bool, spec_h:int=84, spec_w:int=168):
+        """Segment an audio track into spectrograms and chord-frames.
 
         Parameters
         ==========
-        track_id: str
-            track_id of the audio file to segment
+        track_id: str|int
+            track_id of the audio file to segment.
+            If int, track_id will be self.track_list[track_id].
+        savez: bool
+            If True, save the spectrogram and chord_frame tensors as .pt files.
         spec_h, spec_w: int
-            target height and width of the spectrogram
+            target height and width of the spectrogram.
         """
+        if isinstance(track_id, int):
+            track_id = self.track_list[track_id]
+
         # read lab file
         lines = self._read_lab(track_id)
 
         # load audio file
-        audio_path = os.path.join(self.audio_dir, track_id + self.audio_format)
-        waveform, _ = librosa.load(audio_path, sr=self.sr)
+        audio_path = os.path.join(self.audio_dir, track_id + '.mp4')
+        waveform, _ = librosa.load(audio_path, sr=self.sr) # waveform: np.ndarray
 
         # segment audio file
-        segments = []
+        list_spectrograms = torch.empty((len(lines), spec_h, spec_w))
+        list_chord_frames = torch.empty((len(lines), 4, 13))
+
         for i, line in enumerate(lines):
             start_time, end_time, notation = line
             start_frame = int(start_time * self.sr)
             end_frame = int(end_time * self.sr)
             seg_audio = waveform[start_frame:end_frame]
-            seg_spectrogram = self._preprocess_audio(seg_audio, spec_h, spec_w)
-            chord_frame = self.get_chord_frame(notation)
-            segments.append((seg_spectrogram, chord_frame))
 
-            if savez:
-                savez_dir = os.path.join(self.segs_dir, track_id)
-                os.makedirs(savez_dir, exist_ok=True)
-                savez_path = os.path.join(savez_dir, f'{track_id}_{i}.npz')
-                np.savez(savez_path, spec=seg_spectrogram, chord=chord_frame)
+            list_spectrograms[i] = self._preprocess_audio(seg_audio, spec_h, spec_w)
+
+            seg_chord_frame = self.get_chord_frame(notation)
+            list_chord_frames[i] = torch.from_numpy(seg_chord_frame)
+
+        if savez:
+            torch.save(list_spectrograms, os.path.join(self.segs_dir, f'{track_id}_spec.pt'))
+            torch.save(list_chord_frames, os.path.join(self.segs_dir, f'{track_id}_chord.pt'))
         
-        return segments
+        return list_spectrograms, list_chord_frames
         
 
-    def _preprocess_audio(self, audio, spec_h:int, spec_w:int):
+    def _preprocess_audio(self, audio:np.ndarray, spec_h:int, spec_w:int) -> torch.tensor:
         """Prepares segmented audio for training by applying a number of transformations.
 
         Constant-Q transform, np.abs, amplitude_to_db is applied to the audio.
         The resulting spectrogram is converted to a torch.tensor and returned.
 
+
+        Parameters
+        ==========
+        audio: np.ndarray
+            Segmented audio
+        spec_h, spec_w: int (default=84, 168)
+            Target height and width of the spectrogram.
+            See <Constant-Q Transform> for more details.
+
+
         Constant-Q Transform
         ====================
-        n_bins is determined so that the resulting spectrogram will have the height of `spec_h`.
-        hop_length is determined so that the resulting spectrogram will have the width of `spec_w`.
+        n_bins: number of frequency bins in the spectrogram.
+            n_bins will be set to spec_h (default=84)
+        hop_length: number of samples between successive CQT columns.
+            hop_length will be set so that the resulting spectrogram will have the width as
+            close to spec_w (default=168) as possible.
         """
 
         # n_bins = spec_h
         # spec_w = ceil(len(audio) / hop_length)
         hop_length = int((len(audio) / (spec_w-1)))
 
-        cqt = librosa.cqt(audio, sr=self.sr, n_bins=spec_h, hop_length=hop_length)
-        cqt = np.abs(cqt)
-        cqt = librosa.amplitude_to_db(cqt, ref=np.max)
-        cqt = torch.from_numpy(cqt)
+        seg_spectrogram = librosa.cqt(audio, sr=self.sr, n_bins=spec_h, hop_length=hop_length)
+        seg_spectrogram = np.abs(seg_spectrogram)
+        seg_spectrogram = librosa.amplitude_to_db(seg_spectrogram, ref=np.max)
 
-        return cqt
+        # pad or crop spectrogram to have the width of `spec_w`
+        if seg_spectrogram.shape[1] < spec_w: # pad
+            n_pad = spec_w - seg_spectrogram.shape[1]
+            seg_spectrogram = np.pad(seg_spectrogram, ((0,0),(0,n_pad)), 'edge')
+        elif seg_spectrogram.shape[1] > spec_w: # crop
+            seg_spectrogram = seg_spectrogram[:, :spec_w]
+
+        seg_spectrogram = torch.from_numpy(seg_spectrogram)
+
+        return seg_spectrogram
     
     def get_idx(self, this, root):
         """Get the row, col index for 'this' in chord_frame when the root note is 'root'"""
@@ -273,7 +294,7 @@ class JAAHDataset(Dataset):
         return col, row
 
 
-    def get_chord_frame(self, notation):
+    def get_chord_frame(self, notation) -> np.ndarray:
         """
         Cases:
         1. single note
@@ -338,7 +359,7 @@ class JAAHDataset(Dataset):
 
     def _get_track_list(self):
         """Returns a list of track_id for audio files available in audio_path"""
-        track_list = [f.split('.')[0] for f in os.listdir(self.audio_dir) if f.endswith(self.audio_format)]
+        track_list = [f.split('.')[0] for f in os.listdir(self.audio_dir) if f.endswith('.mp4')]
         
         assert 'download_info' not in track_list, "download_info.json file was included in the track_list."
 
