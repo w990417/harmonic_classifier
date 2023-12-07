@@ -1,11 +1,14 @@
 """Create custom dataset to be used with PyTorch."""
 import os
+import random
 import re
 import json
 import numpy as np
 import torch
 import librosa
+import pandas as pd
 from torch.utils.data import Dataset
+from torch.utils.data import Sampler
 
 from toolbox.utils import downloader
 
@@ -101,51 +104,41 @@ class JAAHDataset(Dataset):
         self.cf_dir = os.path.join(data_home, 'chord_frames')
         self.sr = sr
         self.drop_N = drop_N
+        self.spec_data = None
+        self.cf_data = None
         
         self.track_list = self._get_track_list()
 
-    def __len__(self, track_id:str|int='all'):
-        """Returns the number of segments in the given track_id.
+    def __len__(self):
+        if self.spec_data is None:
+            self.load_data()
+        return len(self.spec_data)
+
         
-        Parameters
-        ==========
-        track_id: str|int
-            Count the number of segments for the given track_id.
-            If 'all', return the number of segments for all track_ids.
-        """
-        if track_id == 'all':
-            lenz = [self.__len__(track_id) for track_id in self.track_list]
-            return lenz
-        elif isinstance(track_id, int):
-            track_id = self.track_list[track_id]
-        return len(self._read_lab(track_id))
-
-    def __getitem__(self, track_id:str|int) -> (torch.tensor, torch.tensor):
-        """Loads spectrogram and chord-frame tensors from .pt files and return them.
+    def __getitem__(self, index): 
+        if isinstance(index, int):
+            return self.spec_data[index], self.cf_data[index]
         
-        Parameters
-        ==========
-        track_id: str|int
-            Track_id of the audio, spectrogram, and chord_frame to be loaded.
-            If int, track_id will be self.track_list[track_id].
+        # index is a list of indices
+        return self.spec_data[index], self.cf_data[index]
 
-        Returns
-        =======
-        spec: torch.tensor, shape=(n_segments, spec_h, spec_w)
-            Spectrogram tensor for the given track_id.
-        chord_frame: torch.tensor, shape=(n_segments, 4, 13)
-            Chord-frame tensor for the given track_id.
-        """
-        if isinstance(track_id, int):
-            track_id = self.track_list[track_id]
+    def load_data(self):
+        for track_id in self.track_list:
+            spec_path = os.path.join(self.spec_dir, f'{track_id}_spec.pt')
+            cf_path = os.path.join(self.cf_dir, f'{track_id}_cf.pt')
 
-        spec_path = os.path.join(self.spec_dir, f'{track_id}_spec.pt')
-        chord_path = os.path.join(self.cf_dir, f'{track_id}_cf.pt')
+            spec_batch = torch.load(spec_path)
+            cf_batch = torch.load(cf_path)
 
-        spec = torch.load(spec_path)
-        chord_frame = torch.load(chord_path)
+            if self.spec_data is None:
+                self.spec_data = spec_batch
+                self.cf_data = cf_batch
+            else:
+                self.spec_data = torch.cat((self.spec_data, spec_batch))
+                self.cf_data = torch.cat((self.cf_data, cf_batch))
 
-        return spec, chord_frame
+
+
 
     def _load_audio(self, track_id:str):
         audio_path = os.path.join(self.audio_dir, track_id + '.mp4')
@@ -178,8 +171,8 @@ class JAAHDataset(Dataset):
         waveform, _ = librosa.load(audio_path, sr=self.sr) # waveform: np.ndarray
 
         # segment audio file
-        list_spectrograms = torch.empty((len(lines), spec_h, spec_w))
-        list_chord_frames = torch.empty((len(lines), 4, 13))
+        spec_batch = torch.empty((len(lines), spec_h, spec_w))
+        chord_batch = torch.empty((len(lines), 4, 13))
 
         for i, line in enumerate(lines):
             start_time, end_time, notation = line
@@ -191,16 +184,16 @@ class JAAHDataset(Dataset):
             seg_chord_frame = self.get_chord_frame(notation)
             if seg_chord_frame is None:
                 continue # skip the invalid notation
-            list_chord_frames[i] = torch.from_numpy(seg_chord_frame)
+            chord_batch[i] = torch.from_numpy(seg_chord_frame)
 
             # segment spectrogram
-            list_spectrograms[i] = self._preprocess_audio(seg_audio, spec_h, spec_w)
+            spec_batch[i] = self._preprocess_audio(seg_audio, spec_h, spec_w)
 
         if savez:
-            torch.save(list_spectrograms, os.path.join(self.spec_dir, f'{track_id}_spec.pt'))
-            torch.save(list_chord_frames, os.path.join(self.cf_dir, f'{track_id}_cf.pt'))
+            torch.save(spec_batch, os.path.join(self.spec_dir, f'{track_id}_spec.pt'))
+            torch.save(chord_batch, os.path.join(self.cf_dir, f'{track_id}_cf.pt'))
         
-        return list_spectrograms, list_chord_frames
+        return spec_batch, chord_batch
         
 
     def _preprocess_audio(self, audio:np.ndarray, spec_h:int, spec_w:int) -> torch.tensor:
@@ -441,16 +434,44 @@ class JAAHDataset(Dataset):
                 json.dump(download_info, f, indent=4)
 
 
-def prep_audio(audio:np.ndarray, sample_rate:int, hop_length=512):
-    """Prepares segmented audio for training by applying a number of transformations.
-    
-    Constant-Q transform, np.abs, amplitude_to_db is applied to the audio.
-    The resulting spectrogram is converted to a torch.tensor and returned.
-    """
+class JAAHSampler:
+    def __init__(self, dataset, batch_size, shuffle, drop_last=False):
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.drop_last = drop_last
 
-    cqt = librosa.cqt(audio, sr=sample_rate, hop_length=hop_length)
-    cqt = np.abs(cqt)
-    cqt = librosa.amplitude_to_db(cqt, ref=np.max)
-    cqt = torch.from_numpy(cqt)
+        # initialise indices
+        self.indices = list(range(len(dataset)))
+        if shuffle:
+            random.shuffle(self.indices)
 
-    return cqt
+    def __iter__(self):
+        batch_start = 0
+        while batch_start < len(self.indices):
+            batch_end = min(batch_start + self.batch_size, len(self.indices))
+            batch = self.indices[batch_start:batch_end]
+            yield self.dataset.__getitem__(batch)
+            batch_start = batch_end
+            
+        # If drop_last is False and there are remaining samples, yield the last batch
+        if not self.drop_last and batch_start != len(self.indices):
+            batch = self.indices[batch_start:]
+            yield self.dataset.__getitem__(batch)
+
+    def __len__(self):
+        if self.drop_last:
+            return len(self.indices) // self.batch_size
+        else:
+            return (len(self.indices) + self.batch_size - 1) // self.batch_size
+        
+
+def cf_to_df(chord_frame:np.ndarray, styled:bool=True):
+    """Displays chord frame as pandas DataFrame"""
+    df = pd.DataFrame(chord_frame, columns=['C', 'C#', 'D', 'D#', 'E', 'F', 'F#',
+                                    'G', 'G#', 'A', 'A#', 'B', 'None'])
+    df.index = ['root', '3rd', '5th', '7th']
+    if styled:
+        return df.style.background_gradient(cmap="YlGnBu", axis=1, low=0.0, high=1.0)
+    else:
+        return df
