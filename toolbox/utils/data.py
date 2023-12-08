@@ -182,8 +182,9 @@ class JAAHDataset(Dataset):
 
             # get chord_frame for the segment
             seg_chord_frame = self.get_chord_frame(notation)
-            if seg_chord_frame is None:
-                continue # skip the invalid notation
+            for row in range(4):
+                if np.sum(seg_chord_frame[row]) == 0:
+                    seg_chord_frame[row, -1] = 1.0
             chord_batch[i] = torch.from_numpy(seg_chord_frame)
 
             # segment spectrogram
@@ -300,8 +301,6 @@ class JAAHDataset(Dataset):
 
         root = re.split(r'[:/]', notation)[0]
         rest = re.split(r'[:/]', notation)[1]
-
-            
 
         if rest[0] == '(': # C:(3,5,b7,#9)
             frame[0, note_to_idx[root]] = 1.0
@@ -436,34 +435,48 @@ class JAAHDataset(Dataset):
 
 class JAAHSampler:
     def __init__(self, dataset, batch_size, shuffle, drop_last=False):
+        """Sampler for JAAH dataset.
+        Passes a list of indices to the dataset.__getitem__() which
+        returns a tuple of spectrogram and chord_frame tensor slices.
+        """
         self.dataset = dataset
         self.batch_size = batch_size
         self.shuffle = shuffle
         self.drop_last = drop_last
-
+        self._init_indices()
+ 
+    def _init_indices(self):
         # initialise indices
-        self.indices = list(range(len(dataset)))
-        if shuffle:
-            random.shuffle(self.indices)
+        indices = list(range(len(self.dataset)))
+        if self.shuffle:
+            random.shuffle(indices)
+
+        # split indices into train/val/test sets
+        self.train_indices = indices[:int(len(indices)*0.8)]
+        self.val_indices = indices[int(len(indices)*0.8):int(len(indices)*0.9)]
+        self.test_indices = indices[int(len(indices)*0.9):]
 
     def __iter__(self):
         batch_start = 0
-        while batch_start < len(self.indices):
-            batch_end = min(batch_start + self.batch_size, len(self.indices))
-            batch = self.indices[batch_start:batch_end]
+        while batch_start < len(self.train_indices):
+            batch_end = min(batch_start + self.batch_size, len(self.train_indices))
+            batch = self.train_indices[batch_start:batch_end]
             yield self.dataset.__getitem__(batch)
             batch_start = batch_end
             
         # If drop_last is False and there are remaining samples, yield the last batch
-        if not self.drop_last and batch_start != len(self.indices):
-            batch = self.indices[batch_start:]
+        if not self.drop_last and batch_start != len(self.train_indices):
+            batch = self.train_indices[batch_start:]
             yield self.dataset.__getitem__(batch)
+
+    def shuffle_train(self):
+        random.shuffle(self.train_indices)
 
     def __len__(self):
         if self.drop_last:
-            return len(self.indices) // self.batch_size
+            return len(self.dataset) // self.batch_size
         else:
-            return (len(self.indices) + self.batch_size - 1) // self.batch_size
+            return (len(self.dataset) + self.batch_size - 1) // self.batch_size
         
 
 def cf_to_df(chord_frame:np.ndarray, styled:bool=True):

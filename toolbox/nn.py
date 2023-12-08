@@ -65,19 +65,16 @@ class ChordLoss(nn.Module):
         self.loss_weights = loss_weights
 
     def forward(self, pred, targ):
+        # shape=(batch_size, 4, 13)
         assert pred.shape == targ.shape, 'Ensure "pred" and "targ" have the same shape'
 
-        loss = 0.0
+        total_loss = 0.0
         # calculate BCE loss for each row of chord_frame tensors
         for i, weight in enumerate(self.loss_weights):
-            row_loss = F.binary_cross_entropy(pred[i], targ[i], reduction='mean')
-
-            # scale row losses according to chord frame weights
-            scaled_loss = row_loss * weight
-
-            loss += scaled_loss
+            row_loss = F.binary_cross_entropy(pred[:, i], targ[:, i])
+            total_loss += weight * row_loss
             
-        return loss
+        return total_loss
 
 
 def trainer(model, sampler, loss_fn, optim, num_epochs, save_every:int, save_dir:str, device):
@@ -98,7 +95,7 @@ def _trainer(model, sampler, loss_fn, optim, num_epochs, save_every:int, save_pa
 
     for epoch in range(num_epochs):
         epoch_loss = 0.0
-        batch_count = 0
+        #batch_count = 0
         model.train()
 
         for inputs, targets in sampler:
@@ -115,10 +112,10 @@ def _trainer(model, sampler, loss_fn, optim, num_epochs, save_every:int, save_pa
             epoch_loss += loss.item()
             loss.backward()
             optim.step()
-            batch_count += 1
+            #batch_count += 1
             
         # update loss every epoch
-        print(f"Epoch {epoch+1} loss: {epoch_loss:.4f}")
+        print(f"Epoch {epoch+1} loss: ({epoch_loss:.4f})")
         list_loss.append(epoch_loss)
           
         # save model parameters to disk
