@@ -57,6 +57,7 @@ note_to_idx = {'Cb': 11, 'C': 0, 'C#': 1,
                 'Bb': 10, 'B': 11,
                 'N': 12}
 
+idx_to_note = {v: k for k, v in note_to_idx.items()}
 
 class JAAHDataset(Dataset):
     """JAAH dataset for PyTorch.
@@ -137,7 +138,24 @@ class JAAHDataset(Dataset):
                 self.spec_data = torch.cat((self.spec_data, spec_batch))
                 self.cf_data = torch.cat((self.cf_data, cf_batch))
 
+        return self.spec_data, self.cf_data
 
+    def load_data_crnn(self):
+        for track_id in self.track_list:
+            spec_path = os.path.join(self.spec_dir, f'{track_id}_spec.pt')
+            cf_path = os.path.join(self.cf_dir, f'{track_id}_cf.pt')
+
+            spec_batch = torch.load(spec_path)
+            cf_batch = torch.load(cf_path)
+
+            if self.spec_data is None:
+                self.spec_data = [spec_batch]
+                self.cf_data = [cf_batch]
+            else:
+                self.spec_data.append(spec_batch)
+                self.cf_data.append(cf_batch)
+
+        return self.spec_data, self.cf_data
 
 
     def _load_audio(self, track_id:str):
@@ -433,51 +451,33 @@ class JAAHDataset(Dataset):
                 json.dump(download_info, f, indent=4)
 
 
-class JAAHSampler:
-    def __init__(self, dataset, batch_size, shuffle, drop_last=False):
-        """Sampler for JAAH dataset.
-        Passes a list of indices to the dataset.__getitem__() which
-        returns a tuple of spectrogram and chord_frame tensor slices.
-        """
-        self.dataset = dataset
+class JAAHLoader:
+    def __init__(self, inputs, targets, batch_size, shuffle, drop_last=False):
+        """Sampler for JAAH dataset."""
+        self.inputs = inputs
+        self.targets = targets
         self.batch_size = batch_size
-        self.shuffle = shuffle
         self.drop_last = drop_last
-        self._init_indices()
- 
-    def _init_indices(self):
-        # initialise indices
-        indices = list(range(len(self.dataset)))
-        if self.shuffle:
-            random.shuffle(indices)
-
-        # split indices into train/val/test sets
-        self.train_indices = indices[:int(len(indices)*0.8)]
-        self.val_indices = indices[int(len(indices)*0.8):int(len(indices)*0.9)]
-        self.test_indices = indices[int(len(indices)*0.9):]
+        self.idx = list(range(len(self.inputs)))
+        if shuffle:
+            self.shuffle()
 
     def __iter__(self):
         batch_start = 0
-        while batch_start < len(self.train_indices):
-            batch_end = min(batch_start + self.batch_size, len(self.train_indices))
-            batch = self.train_indices[batch_start:batch_end]
-            yield self.dataset.__getitem__(batch)
+        while batch_start < len(self.idx):
+            batch_end = min(batch_start + self.batch_size, len(self.idx))
+            batch = self.idx[batch_start:batch_end]
+            yield self.inputs[batch], self.targets[batch]
             batch_start = batch_end
             
         # If drop_last is False and there are remaining samples, yield the last batch
-        if not self.drop_last and batch_start != len(self.train_indices):
-            batch = self.train_indices[batch_start:]
-            yield self.dataset.__getitem__(batch)
-
-    def shuffle_train(self):
-        random.shuffle(self.train_indices)
-
-    def __len__(self):
-        if self.drop_last:
-            return len(self.dataset) // self.batch_size
-        else:
-            return (len(self.dataset) + self.batch_size - 1) // self.batch_size
-        
+        if not self.drop_last and batch_start != len(self.idx):
+            batch = self.idx[batch_start:]
+            yield self.inputs[batch], self.targets[batch]
+    
+    def shuffle(self):
+        random.shuffle(self.idx)
+    
 
 def cf_to_df(chord_frame:np.ndarray, styled:bool=True):
     """Displays chord frame as pandas DataFrame"""
@@ -488,3 +488,20 @@ def cf_to_df(chord_frame:np.ndarray, styled:bool=True):
         return df.style.background_gradient(cmap="YlGnBu", axis=1, low=0.0, high=1.0)
     else:
         return df
+    
+def cf_to_notation(chord_frame:np.ndarray):
+    """Returns the notation for the given chord_frame"""
+    idx = np.argmax(chord_frame, axis=1)
+    if idx_to_note[idx[0]] == 'N':
+        return 'N'
+    
+    notes = [idx_to_note[i] for i in idx]
+    notation = notes[0] + ':'
+    for note in notes[1:]:
+        if note == 'N':
+            continue
+        notation += note + ','
+    
+    return notation[:-1] # remove the last comma
+    
+
