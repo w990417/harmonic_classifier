@@ -17,10 +17,9 @@ import os
 import json
 import pytube
 
-from .api import mb_api as MusicBrainzAPI
-from .api import yt_api as YouTubeAPI
+from toolbox.api import MusicBrainzAPI, YouTubeAPI
 
-DOWNLOAD_INFO = 'd:\\repos\\harmonic_classifier\\JAAH\\audio\\download_info.json'
+# DOWNLOAD_INFO = 'd:\\repos\\harmonic_classifier\\JAAH\\audio\\download_info.json'
 
 @dataclass
 class VideoMatch:

@@ -1,7 +1,11 @@
 __pycache__/
 *.pyc
 test.ipynb
+memo
 
 # data is too large and copyrighed
 data/
-download_info.BACKUP
+model/
+
+# mac os env related
+Miniconda3-latest-MacOSX-arm64.sh
