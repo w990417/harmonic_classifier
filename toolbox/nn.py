@@ -32,28 +32,24 @@ class CRNN(nn.Module):
         )
         self.cnn_linear = nn.Linear(32 * 21 * 42, lstm_input_size)
         self.lstm_linear = nn.Linear(lstm_hidden_size, 52)
+        self.softmax = nn.Softmax(dim=2)
+        self.hidden_state = None
         self.lstm_input_size = lstm_input_size
         self.lstm_hidden_size = lstm_hidden_size
         self.lstm = nn.LSTM(input_size=lstm_input_size, hidden_size=lstm_hidden_size)
-        self.hidden_states = {}
-
-    def forward(self, x, track_id):
+ 
+    def forward(self, x):
         # forward pass CNN
         cnn_output = self.cnn(x)
         cnn_output = cnn_output.view(-1, 32 * 21 * 42)
-        cnn_output = self.cnn_linear(cnn_output)
-        lstm_input = cnn_output.view(cnn_output.shape[0], self.lstm_input_size)
-
-        if track_id not in self.hidden_states:
-            self.hidden_states[track_id] = (
-                torch.zeros(1, self.lstm_hidden_size).to(x.device),  # Hidden state
-                torch.zeros(1, self.lstm_hidden_size).to(x.device)   # Cell state
-            )
-        
+        cnn_linear_output = self.cnn_linear(cnn_output)
+        lstm_input = cnn_linear_output.view(cnn_output.shape[0], self.lstm_input_size)   
         # forward pass LSTM
-        lstm_output, self.hidden_states[track_id] = self.lstm(lstm_input, self.hidden_states[track_id])
-        output = self.lstm_linear(lstm_output)
-        output = output.view(-1, 4, 13) # reshape to match chord_frame's shape
+        lstm_output, hidden_state = self.lstm(lstm_input)
+        self.hidden_state = hidden_state
+        lstm_linear_output = self.lstm_linear(lstm_output)
+        lstm_linear_output = lstm_linear_output.view(-1, 4, 13) # reshape to match chord_frame's shape
+        output = self.softmax(lstm_linear_output)
         return output
     
     def forward_validation(self, x):
@@ -61,12 +57,13 @@ class CRNN(nn.Module):
         # forward pass CNN
         cnn_output = self.cnn(x)
         cnn_output = cnn_output.view(-1, 32 * 21 * 42)
-        cnn_output = self.cnn_linear(cnn_output)
-        lstm_input = cnn_output.view(cnn_output.shape[0], self.lstm_input_size)
+        cnn_linear_output = self.cnn_linear(cnn_output)
+        lstm_input = cnn_linear_output.view(cnn_output.shape[0], self.lstm_input_size)
         # forward pass LSTM without hidden states
         lstm_output, _ = self.lstm(lstm_input)
-        output = self.lstm_linear(lstm_output)
-        output = output.view(-1, 4, 13)
+        lstm_linear_output = self.lstm_linear(lstm_output)
+        lstm_linear_output = lstm_linear_output.view(-1, 4, 13)
+        output = self.softmax(lstm_linear_output)
         return output
 
 
@@ -177,6 +174,8 @@ class ChordLoss(nn.Module):
         assert pred.shape == targ.shape, f'Ensure "pred{pred.shape}" and "targ{targ.shape}" have the same shape'
 
         loss_weight_map = torch.zeros_like(targ, dtype=torch.float32)
+        loss_weight_map = loss_weight_map.to(pred.device)
+
         for i, weight in enumerate(self.loss_weights):
             loss_weight_map[:, i] = weight
         
